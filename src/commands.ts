@@ -1,8 +1,7 @@
 import { XMLname } from "./constants";
 import { commands, Range, Selection, SnippetString, window } from "vscode";
 import { Formatter, FormatterError } from "tei-xml-fmt";
-import { findTagPair, markupEnd } from "./services/autorename";
-import { findParentElement, findSplitElement } from "./services/selection";
+import { parseElements, findEnclosing, findParent } from "./services/elements";
 import type { Position, TextDocument, TextEditor } from "vscode";
 
 export const suggestAttValue = commands.registerTextEditorCommand(
@@ -93,20 +92,20 @@ export const deleteTag = commands.registerTextEditorCommand(
   "sxml.deleteTag",
   (editor, edit) => {
     const doc = editor.document;
-    const text = doc.getText();
-    const pair = findTagPair(text, doc.offsetAt(editor.selection.active));
-    if (!pair) return;
-    const [open, close] = pair;
-
-    const openEnd = markupEnd(text, open.end);
-    const closeEnd = text.indexOf(">", close.end);
-    if (openEnd < 0 || closeEnd < 0) return;
-
-    edit.delete(
-      new Range(doc.positionAt(close.start - 2), doc.positionAt(closeEnd + 1)),
+    const el = findEnclosing(
+      parseElements(doc.getText()),
+      doc.offsetAt(editor.selection.active),
     );
+    if (!el) return;
+
+    // End tag first, then start tag. A self closing element has only one tag.
+    if (!el.selfClosing) {
+      edit.delete(
+        new Range(doc.positionAt(el.closeStart), doc.positionAt(el.closeEnd)),
+      );
+    }
     edit.delete(
-      new Range(doc.positionAt(open.start - 1), doc.positionAt(openEnd + 1)),
+      new Range(doc.positionAt(el.openStart), doc.positionAt(el.openEnd)),
     );
   },
 );
@@ -115,15 +114,18 @@ export const expandSelection = commands.registerTextEditorCommand(
   "sxml.expandSelection",
   (editor) => {
     const doc = editor.document;
-    const text = doc.getText();
+    const elements = parseElements(doc.getText());
     editor.selections = editor.selections.map((sel) => {
-      const range = findParentElement(
-        text,
+      const el = findParent(
+        elements,
         doc.offsetAt(sel.start),
         doc.offsetAt(sel.end),
       );
-      return range
-        ? new Selection(doc.positionAt(range[0]), doc.positionAt(range[1]))
+      return el
+        ? new Selection(
+            doc.positionAt(el.openStart),
+            doc.positionAt(el.closeEnd),
+          )
         : sel;
     });
   },
@@ -134,9 +136,12 @@ export const splitElement = commands.registerTextEditorCommand(
   (editor) => {
     const doc = editor.document;
     const pos = editor.selection.active;
-    const name = findSplitElement(doc.getText(), doc.offsetAt(pos));
-    if (!name) return;
-    editor.edit((b) => b.insert(pos, `</${name}><${name}>`));
+    const offset = doc.offsetAt(pos);
+    const el = findEnclosing(parseElements(doc.getText()), offset);
+    // Only split in the content, not in a tag, and never a self closing element.
+    if (!el || el.selfClosing) return;
+    if (offset < el.openEnd || offset > el.closeStart) return;
+    editor.edit((b) => b.insert(pos, `</${el.name}><${el.name}>`));
   },
 );
 
